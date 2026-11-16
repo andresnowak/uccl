@@ -1,6 +1,7 @@
 #include "cxi_endpoint.h"
 #include "engine.h"
 #include <rdma/fi_cm.h>
+#include <rdma/fi_cxi_ext.h>
 #include <rdma/fi_rma.h>
 #include <algorithm>
 #include <chrono>
@@ -29,6 +30,17 @@ void check_fi(char const* what, int ret) {
   if (ret != 0) {
     throw std::runtime_error(std::string(what) + ": " + fi_strerror(-ret));
   }
+}
+
+// Enables CXI hybrid MR descriptors, so the provider uses the desc that a post
+// passes. Without this mode the provider drops the desc.
+int enable_cxi_hybrid_mr_desc(fid_domain* domain) {
+  fi_cxi_dom_ops* ops = nullptr;
+  int rc = fi_open_ops(&domain->fid, FI_CXI_DOM_OPS_3, 0,
+                       reinterpret_cast<void**>(&ops), nullptr);
+  if (rc != 0) return rc;
+  if (!ops || !ops->enable_hybrid_mr_desc) return -FI_ENOSYS;
+  return ops->enable_hybrid_mr_desc(&domain->fid, true);
 }
 
 fi_threading threading_hint() {
@@ -244,6 +256,15 @@ void CxiEndpoint::init_fabric(int gpu_index) {
 
     check_fi("fi_fabric", fi_fabric(info_->fabric_attr, &fabric_, nullptr));
     check_fi("fi_domain", fi_domain(fabric_, info_, &domain_, nullptr));
+    // Must come before fi_endpoint: an endpoint gets the mode when it is made.
+    int const hybrid_rc = enable_cxi_hybrid_mr_desc(domain_);
+    if (hybrid_rc == 0) {
+      UCCL_LOG(INFO, UCCL_INIT) << "CXI hybrid MR desc enabled";
+    } else {
+      UCCL_LOG(WARN) << "CXI hybrid MR desc not available ("
+                     << fi_strerror(-hybrid_rc)
+                     << "); the provider maps local buffers on every post";
+    }
     check_fi("fi_endpoint", fi_endpoint(domain_, info_, &ep_, nullptr));
 
     fi_cq_attr cq_attr{};
